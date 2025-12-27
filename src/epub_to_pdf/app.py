@@ -26,15 +26,16 @@ from .converter import (
     ConversionMethod,
     convert_epub_to_pdf,
     get_available_methods,
+    get_log_file_path,
 )
 
 
 class EPUBToPDFApp:
     """Main application window for EPUB to PDF conversion."""
 
-    WINDOW_WIDTH = 600
-    WINDOW_HEIGHT = 450
-    DROP_ZONE_HEIGHT = 200
+    WINDOW_WIDTH = 700
+    WINDOW_HEIGHT = 600
+    DROP_ZONE_HEIGHT = 150
 
     def __init__(self):
         """Initialize the application."""
@@ -105,6 +106,9 @@ class EPUBToPDFApp:
 
         # Progress section
         self._create_progress_section(main_frame)
+
+        # Log viewer section
+        self._create_log_viewer(main_frame)
 
         # Buttons section
         self._create_buttons(main_frame)
@@ -234,10 +238,8 @@ class EPUBToPDFApp:
 
         methods = [
             ("Auto (Recommended)", "auto"),
-            ("WeasyPrint", "weasyprint"),
-            ("PyMuPDF", "pymupdf"),
-            ("Pandoc", "pandoc"),
-            ("Calibre", "calibre"),
+            ("Prince", "prince"),
+            ("Vivliostyle", "vivliostyle"),
         ]
 
         for text, value in methods:
@@ -267,6 +269,82 @@ class EPUBToPDFApp:
             font=("Segoe UI", 9)
         )
         self.progress_label.pack(anchor=tk.W, pady=(5, 0))
+
+    def _create_log_viewer(self, parent: ttk.Frame):
+        """Create log viewer section."""
+        log_frame = ttk.LabelFrame(parent, text="Conversion Log", padding="5")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # Text widget with scrollbar for log display
+        log_container = ttk.Frame(log_frame)
+        log_container.pack(fill=tk.BOTH, expand=True)
+
+        self.log_text = tk.Text(
+            log_container,
+            height=8,
+            font=("Consolas", 9),
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+            bg="#1e1e1e",
+            fg="#d4d4d4"
+        )
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        log_scrollbar = ttk.Scrollbar(
+            log_container,
+            orient=tk.VERTICAL,
+            command=self.log_text.yview
+        )
+        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.configure(yscrollcommand=log_scrollbar.set)
+
+        # Log file path display and open button
+        log_path_frame = ttk.Frame(log_frame)
+        log_path_frame.pack(fill=tk.X, pady=(5, 0))
+
+        log_file = get_log_file_path()
+        ttk.Label(
+            log_path_frame,
+            text=f"Log file: {log_file}",
+            font=("Segoe UI", 8),
+            foreground="#666666"
+        ).pack(side=tk.LEFT)
+
+        self.open_log_button = ttk.Button(
+            log_path_frame,
+            text="Open Log File",
+            command=self._open_log_file
+        )
+        self.open_log_button.pack(side=tk.RIGHT)
+
+    def _append_log(self, message: str):
+        """Append a message to the log viewer."""
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+
+    def _clear_log(self):
+        """Clear the log viewer."""
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+
+    def _open_log_file(self):
+        """Open the log file in the default text editor."""
+        import subprocess
+        import platform
+
+        log_file = get_log_file_path()
+        if log_file.exists():
+            if platform.system() == "Windows":
+                subprocess.run(["notepad", str(log_file)])
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", str(log_file)])
+            else:
+                subprocess.run(["xdg-open", str(log_file)])
+        else:
+            messagebox.showinfo("Log File", f"Log file not found:\n{log_file}")
 
     def _create_buttons(self, parent: ttk.Frame):
         """Create action buttons."""
@@ -430,6 +508,11 @@ class EPUBToPDFApp:
         self.output_path = Path(output_path)
         self.is_converting = True
 
+        # Clear and update log
+        self._clear_log()
+        self._append_log(f"Input: {self.current_file}")
+        self._append_log(f"Output: {self.output_path}")
+
         # Update UI for conversion
         self.convert_button.configure(state=tk.DISABLED)
         self.progress_bar.start(10)
@@ -439,11 +522,12 @@ class EPUBToPDFApp:
         method_str = self.selected_method.get()
         method = {
             "auto": ConversionMethod.AUTO,
-            "weasyprint": ConversionMethod.WEASYPRINT,
-            "pymupdf": ConversionMethod.PYMUPDF,
-            "pandoc": ConversionMethod.PANDOC,
+            "vivliostyle": ConversionMethod.VIVLIOSTYLE,
             "calibre": ConversionMethod.CALIBRE,
         }.get(method_str, ConversionMethod.AUTO)
+
+        self._append_log(f"Method: {method.value}")
+        self._append_log("=" * 40)
 
         # Run conversion in background thread
         thread = threading.Thread(
@@ -477,8 +561,9 @@ class EPUBToPDFApp:
             self.root.after(0, lambda: self._conversion_complete(False, str(e)))
 
     def _update_progress(self, message: str):
-        """Update progress label (called from background thread)."""
+        """Update progress label and log (called from background thread)."""
         self.root.after(0, lambda: self.progress_label.configure(text=message))
+        self.root.after(0, lambda: self._append_log(message))
 
     def _conversion_complete(self, success: bool, error: Optional[str] = None):
         """Handle conversion completion."""
@@ -487,6 +572,9 @@ class EPUBToPDFApp:
         self.convert_button.configure(state=tk.NORMAL)
 
         if success:
+            self._append_log("=" * 40)
+            self._append_log("Conversion completed successfully!")
+            self._append_log(f"Output: {self.output_path}")
             self.progress_label.configure(text="Conversion complete!")
             self.status_label.configure(text=f"PDF saved: {self.output_path.name}")
             self.open_folder_button.configure(state=tk.NORMAL)
@@ -496,6 +584,9 @@ class EPUBToPDFApp:
                 f"PDF created successfully!\n\n{self.output_path}"
             )
         else:
+            self._append_log("=" * 40)
+            self._append_log("CONVERSION FAILED!")
+            self._append_log(f"Error: {error}")
             self.progress_label.configure(text="Conversion failed")
             self.status_label.configure(text="Error during conversion")
 

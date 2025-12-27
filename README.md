@@ -7,12 +7,12 @@ A graphical utility for converting EPUB files to high-fidelity PDF format, speci
 - **Drag & Drop Interface**: Simply drag and drop EPUB files onto the application window
 - **High-Fidelity Output**: Optimized for OCR processing with preserved image quality
 - **Multiple Conversion Backends**:
-  - **WeasyPrint** (Recommended): Pure Python, excellent CSS support, no external dependencies
-  - **PyMuPDF**: Fast, sub-pixel accurate rendering (may have CSS issues with EPUB3)
-  - **Pandoc**: Document conversion expert (requires PDF engine)
-  - **Calibre**: ebook-convert with extensive configuration options
+  - **Prince** (Recommended): Professional PDF generator with excellent typography, hyphenation, and PDF bookmark support
+  - **Vivliostyle CLI** (Fallback): Node.js-based, uses Chromium for excellent CSS support and high-fidelity rendering
 - **Automatic Fallback**: Automatically tries conversion methods in order until one succeeds
 - **Desktop Shortcut**: Quick launch from Windows desktop
+- **Integrated Log Viewer**: Real-time conversion log display in the GUI
+- **Log File**: Conversion logs are saved to `~/.epub_to_pdf/logs/`
 
 ## Quick Start
 
@@ -37,9 +37,29 @@ C:\Users\matti\venvs\epub_to_pdf\Scripts\activate
 # Install the package
 cd C:\Users\matti\OneDrivePhD\Dev\epub_to_pdf
 uv pip install -e .
+```
 
-# Install WeasyPrint for best compatibility
-uv pip install weasyprint
+### Install Prince (Required)
+
+Download and install Prince from [https://www.princexml.com/download/](https://www.princexml.com/download/).
+
+Prince is a professional PDF generator with excellent typography and hyphenation support.
+
+### Install xq (Required for Prince)
+
+xq is used for parsing EPUB metadata. Download from [https://github.com/sibprogrammer/xq/releases](https://github.com/sibprogrammer/xq/releases) and place in your PATH (e.g., `C:\Users\<username>\bin\xq.exe`).
+
+### Install Vivliostyle CLI (Optional Fallback)
+
+Vivliostyle CLI is used as a fallback if Prince is not available. It requires Node.js:
+
+```bash
+npm install -g @vivliostyle/cli
+```
+
+Verify installation:
+```bash
+vivliostyle --version
 ```
 
 ### Create Desktop Shortcut
@@ -87,7 +107,7 @@ pdf_path = convert_epub_to_pdf(
 # Use specific conversion method
 pdf_path = convert_epub_to_pdf(
     "book.epub",
-    method=ConversionMethod.WEASYPRINT
+    method=ConversionMethod.PRINCE
 )
 
 # With progress callback
@@ -102,14 +122,12 @@ pdf_path = convert_epub_to_pdf(
 
 ## Conversion Methods
 
-| Method | Quality | Speed | CSS Support | Notes |
-|--------|---------|-------|-------------|-------|
-| WeasyPrint | Excellent | Medium | Excellent | Recommended. Pure Python, best compatibility |
-| PyMuPDF | Excellent | Fast | Limited | May fail on EPUB3 with complex CSS |
-| Pandoc | Good | Medium | Good | Requires PDF engine (xelatex/pdflatex) |
-| Calibre | Very Good | Medium | Good | Requires Calibre installation |
+| Method | Quality | Speed | Typography | Notes |
+|--------|---------|-------|------------|-------|
+| Prince | Excellent | Fast | Excellent | Recommended. Professional PDF generator with hyphenation and PDF bookmarks |
+| Vivliostyle | Excellent | Medium | Good | Fallback. Uses Chromium for high-fidelity rendering |
 
-The **Auto** mode tries methods in order: WeasyPrint > PyMuPDF > Pandoc > Calibre
+The **Auto** mode tries methods in order: Prince > Vivliostyle
 
 ## Why This Tool?
 
@@ -117,7 +135,8 @@ When converting EPUBs to PDFs for OCR processing (especially for extracting math
 
 1. **Image Quality Preservation**: Equations stored as images remain crisp and high-resolution
 2. **Layout Fidelity**: Spatial relationships in mathematical content are preserved
-3. **CSS Compatibility**: WeasyPrint handles complex CSS that other tools struggle with
+3. **Typography Excellence**: Prince provides professional typography with hyphenation and proper PDF bookmarks
+4. **CSS Compatibility**: Both backends provide excellent CSS support for accurate rendering
 
 The resulting PDFs are optimized for use with Mistral OCR to obtain accurate markdown conversion with proper image extraction.
 
@@ -149,17 +168,27 @@ epub_to_pdf/
 ## Requirements
 
 - Python >= 3.11
-- weasyprint >= 67.0 (recommended)
-- pymupdf >= 1.24.0
+- Prince: [https://www.princexml.com/download/](https://www.princexml.com/download/)
+- xq: [https://github.com/sibprogrammer/xq/releases](https://github.com/sibprogrammer/xq/releases)
+- Node.js and Vivliostyle CLI (optional fallback): `npm install -g @vivliostyle/cli`
 - tkinterdnd2 >= 0.3.0 (for drag-and-drop support)
 
 ## Troubleshooting
 
-### PyMuPDF CSS Errors
-If you see errors like "css syntax error: unexpected token", this means the EPUB uses CSS features that PyMuPDF doesn't support. The Auto mode will automatically fall back to WeasyPrint.
+### Prince Not Found
+If you see "Prince is not installed", download and install Prince from [https://www.princexml.com/download/](https://www.princexml.com/download/). On Windows, the installer typically places it at `C:\Program Files\Prince\engine\bin\prince.exe`.
 
-### Pandoc Requires PDF Engine
-Pandoc needs a PDF engine (xelatex, pdflatex, or weasyprint) installed. If you don't have LaTeX installed, WeasyPrint is used as Pandoc's PDF engine.
+### xq Not Found
+If you see "xq is not installed", download xq from [https://github.com/sibprogrammer/xq/releases](https://github.com/sibprogrammer/xq/releases) and place it in your PATH (e.g., `C:\Users\<username>\bin\xq.exe`).
+
+### Vivliostyle Not Found
+If Prince fails and Vivliostyle is needed as fallback, install it globally:
+```bash
+npm install -g @vivliostyle/cli
+```
+
+### Log Files
+Conversion logs are saved to `~/.epub_to_pdf/logs/` (e.g., `C:\Users\<username>\.epub_to_pdf\logs\` on Windows). Check these logs for detailed error information.
 
 ## License
 

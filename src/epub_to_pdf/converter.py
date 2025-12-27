@@ -3,27 +3,41 @@
 EPUB to PDF conversion module.
 
 Provides high-fidelity EPUB to PDF conversion optimized for OCR processing.
-Supports multiple backends: WeasyPrint (recommended), PyMuPDF, Pandoc, and Calibre.
+Primary backend: Prince XML (excellent typography and CSS support).
+Fallback: Vivliostyle CLI (Node.js based, good quality).
 """
 
+import os
 import subprocess
 import shutil
 import sys
-import zipfile
+import logging
 import tempfile
-import xml.etree.ElementTree as ET
+import zipfile
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
-from urllib.parse import unquote
+
+# Setup logging
+LOG_DIR = Path.home() / ".epub_to_pdf" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / f"conversion_{datetime.now().strftime('%Y%m%d')}.log"
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 class ConversionMethod(Enum):
     """Available conversion methods."""
-    WEASYPRINT = "weasyprint"
-    PYMUPDF = "pymupdf"
-    PANDOC = "pandoc"
-    CALIBRE = "calibre"
+    PRINCE = "prince"
+    VIVLIOSTYLE = "vivliostyle"
     AUTO = "auto"
 
 
@@ -32,371 +46,472 @@ class ConversionError(Exception):
     pass
 
 
-# Common Calibre installation paths on Windows
-CALIBRE_WINDOWS_PATHS = [
-    Path("C:/Program Files/Calibre2/ebook-convert.exe"),
-    Path("C:/Program Files (x86)/Calibre2/ebook-convert.exe"),
-    Path("C:/Program Files/Calibre/ebook-convert.exe"),
-    Path("C:/Program Files (x86)/Calibre/ebook-convert.exe"),
+# Common Prince installation paths on Windows
+PRINCE_WINDOWS_PATHS = [
+    Path("C:/Program Files/Prince/engine/bin/prince.exe"),
+    Path("C:/Program Files (x86)/Prince/engine/bin/prince.exe"),
 ]
 
-# XML namespaces for EPUB parsing
-NAMESPACES = {
-    'container': 'urn:oasis:names:tc:opendocument:xmlns:container',
-    'opf': 'http://www.idpf.org/2007/opf',
-    'dc': 'http://purl.org/dc/elements/1.1/',
-    'ncx': 'http://www.daisy.org/z3986/2005/ncx/',
-    'xhtml': 'http://www.w3.org/1999/xhtml',
+# Common xq installation paths
+XQ_PATHS = [
+    Path.home() / "bin" / "xq.exe",
+    Path("C:/Users/matti/bin/xq.exe"),
+]
+
+# CSS for PDF bookmarks from EPUB table of contents
+NAV_CSS = '''@namespace epub url("http://www.idpf.org/2007/ops");
+
+/* Don't use Prince's inferred bookmark levels, because we have nav information */
+h1 { prince-bookmark-level: none; }
+h2 { prince-bookmark-level: none; }
+h3 { prince-bookmark-level: none; }
+h4 { prince-bookmark-level: none; }
+h5 { prince-bookmark-level: none; }
+h6 { prince-bookmark-level: none; }
+
+nav[epub|type="landmarks"],
+nav[epub|type="page-list"] {
+  display: none;
 }
 
+nav[epub|type="toc"] {
+  max-height: 0;
+  overflow: hidden;
+}
 
-def _find_calibre_executable() -> Optional[Path]:
-    """Find Calibre's ebook-convert executable."""
-    in_path = shutil.which("ebook-convert")
+/* Convert structure of nav toc to bookmarks. */
+nav[epub|type="toc"] a {
+  prince-bookmark-target: attr(href);
+}
+
+nav[epub|type="toc"]
+  :is([epub|type="list"], ol, ul)
+  a {
+  prince-bookmark-level: 1;
+}
+nav[epub|type="toc"]
+  :is([epub|type="list"], ol, ul)
+  :is([epub|type="list"], ol, ul)
+  a {
+  prince-bookmark-level: 2;
+}
+nav[epub|type="toc"]
+  :is([epub|type="list"], ol, ul)
+  :is([epub|type="list"], ol, ul)
+  :is([epub|type="list"], ol, ul)
+  a {
+  prince-bookmark-level: 3;
+}
+nav[epub|type="toc"]
+  :is([epub|type="list"], ol, ul)
+  :is([epub|type="list"], ol, ul)
+  :is([epub|type="list"], ol, ul)
+  :is([epub|type="list"], ol, ul)
+  a {
+  prince-bookmark-level: 4;
+}
+'''
+
+# Theme CSS for PDF page layout
+THEME_CSS = '''@namespace epub url("http://www.idpf.org/2007/ops");
+
+@page {
+  size: A4;
+  margin: 48pt;
+}
+
+body {
+  font-size: 12pt;
+}
+
+html {
+  -prince-hyphenate-character: '\\0000AD';
+}
+
+p {
+  hyphens: auto;
+}
+'''
+
+
+def get_log_file_path() -> Path:
+    """Return the path to the current log file."""
+    return LOG_FILE
+
+
+def _find_prince_executable() -> Optional[Path]:
+    """Find Prince XML executable."""
+    # Check PATH first
+    in_path = shutil.which("prince")
     if in_path:
         return Path(in_path)
 
+    in_path = shutil.which("prince-books")
+    if in_path:
+        return Path(in_path)
+
+    # Check common Windows paths
     if sys.platform == "win32":
-        for path in CALIBRE_WINDOWS_PATHS:
+        for path in PRINCE_WINDOWS_PATHS:
             if path.exists():
                 return path
 
     return None
 
 
-def _check_weasyprint_available() -> bool:
-    """Check if WeasyPrint is available."""
-    try:
-        import weasyprint  # noqa: F401
-        return True
-    except ImportError:
-        return False
+def _find_xq_executable() -> Optional[Path]:
+    """Find xq (XML query) executable."""
+    in_path = shutil.which("xq")
+    if in_path:
+        return Path(in_path)
+
+    # Check common paths
+    for path in XQ_PATHS:
+        if path.exists():
+            return path
+
+    return None
 
 
-def _check_pymupdf_available() -> bool:
-    """Check if PyMuPDF is available."""
-    try:
-        import fitz  # noqa: F401
-        return True
-    except ImportError:
-        return False
+def _find_vivliostyle_executable() -> Optional[str]:
+    """Find Vivliostyle CLI executable."""
+    # On Windows, need to look for .cmd file
+    if sys.platform == "win32":
+        cmd_path = shutil.which("vivliostyle.cmd")
+        if cmd_path:
+            return cmd_path
+    return shutil.which("vivliostyle")
 
 
-def _check_pandoc_available() -> bool:
-    """Check if Pandoc is available in PATH."""
-    return shutil.which("pandoc") is not None
+def _check_prince_available() -> bool:
+    """Check if Prince XML is available."""
+    return _find_prince_executable() is not None and _find_xq_executable() is not None
 
 
-def _check_calibre_available() -> bool:
-    """Check if Calibre's ebook-convert is available."""
-    return _find_calibre_executable() is not None
+def _check_vivliostyle_available() -> bool:
+    """Check if Vivliostyle CLI is available."""
+    return _find_vivliostyle_executable() is not None
 
 
-def _get_epub_spine_items(epub_path: Path) -> list[tuple[str, Path]]:
-    """
-    Extract the reading order (spine) from an EPUB file.
-
-    Returns list of (item_id, relative_path) tuples in reading order.
-    """
-    with zipfile.ZipFile(epub_path, 'r') as zf:
-        # Read container.xml to find OPF file
-        container = ET.fromstring(zf.read('META-INF/container.xml'))
-        rootfile = container.find('.//container:rootfile', NAMESPACES)
-        if rootfile is None:
-            raise ConversionError("Cannot find rootfile in container.xml")
-
-        opf_path = rootfile.get('full-path')
-        opf_dir = str(Path(opf_path).parent)
-        if opf_dir == '.':
-            opf_dir = ''
-
-        # Parse OPF file
-        opf = ET.fromstring(zf.read(opf_path))
-
-        # Build manifest dict (id -> href)
-        manifest = {}
-        for item in opf.findall('.//opf:manifest/opf:item', NAMESPACES):
-            item_id = item.get('id')
-            href = item.get('href')
-            media_type = item.get('media-type', '')
-            if media_type in ('application/xhtml+xml', 'text/html'):
-                if opf_dir:
-                    manifest[item_id] = f"{opf_dir}/{href}"
-                else:
-                    manifest[item_id] = href
-
-        # Get spine order
-        spine_items = []
-        for itemref in opf.findall('.//opf:spine/opf:itemref', NAMESPACES):
-            idref = itemref.get('idref')
-            if idref in manifest:
-                spine_items.append((idref, manifest[idref]))
-
-        return spine_items
+def _run_xq(xq_exe: Path, xml_file: Path, xpath: str) -> str:
+    """Run xq to extract data from XML file using XPath."""
+    cmd = [str(xq_exe), str(xml_file), "-x", xpath]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    return result.stdout.strip()
 
 
-def _convert_with_weasyprint(
+def _convert_with_prince(
     epub_path: Path,
     pdf_path: Path,
     progress_callback: Optional[Callable[[str], None]] = None
 ) -> Path:
     """
-    Convert EPUB to PDF using WeasyPrint.
+    Convert EPUB to PDF using Prince XML.
 
-    WeasyPrint is a pure Python solution that renders HTML/CSS to PDF
-    with excellent CSS support and no external dependencies.
+    This method unpacks the EPUB, parses its structure using xq,
+    and uses Prince for high-quality PDF generation with proper
+    typography, hyphenation, and CSS support.
     """
-    try:
-        from weasyprint import HTML, CSS
-        from weasyprint.text.fonts import FontConfiguration
-    except ImportError:
+    prince_exe = _find_prince_executable()
+    xq_exe = _find_xq_executable()
+
+    if not prince_exe:
         raise ConversionError(
-            "WeasyPrint is not installed. Install with: uv pip install weasyprint"
+            "Prince XML is not installed. "
+            "Install from: https://www.princexml.com/"
         )
 
+    if not xq_exe:
+        raise ConversionError(
+            "xq (XML query tool) is not installed. "
+            "Install from: https://github.com/sibprogrammer/xq/releases"
+        )
+
+    logger.info(f"Starting Prince conversion: {epub_path} -> {pdf_path}")
+    logger.info(f"Prince executable: {prince_exe}")
+    logger.info(f"xq executable: {xq_exe}")
+
     if progress_callback:
-        progress_callback("Extracting EPUB content...")
+        progress_callback("Analyzing EPUB structure...")
 
     try:
-        # Create temporary directory for extraction
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
+        # Create temp directory for unpacking
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
 
-            # Extract EPUB
-            with zipfile.ZipFile(epub_path, 'r') as zf:
-                zf.extractall(temp_path)
+            # Verify it's a valid EPUB
+            try:
+                with zipfile.ZipFile(epub_path, 'r') as zf:
+                    try:
+                        mimetype = zf.read('mimetype').decode('utf-8').strip()
+                        if mimetype != 'application/epub+zip':
+                            raise ConversionError(f"Invalid EPUB mimetype: {mimetype}")
+                    except KeyError:
+                        logger.warning("EPUB missing mimetype file, continuing anyway")
 
-            # Get spine items (reading order)
-            spine_items = _get_epub_spine_items(epub_path)
+                    # Extract all files
+                    zf.extractall(tmpdir)
+            except zipfile.BadZipFile:
+                raise ConversionError("Input file is not a valid ZIP/EPUB file")
+
+            if progress_callback:
+                progress_callback("Parsing EPUB metadata...")
+
+            # Find container.xml
+            container_xml = tmpdir / "META-INF" / "container.xml"
+            if not container_xml.exists():
+                raise ConversionError("EPUB missing container.xml - not a valid EPUB3 file")
+
+            # Get path to package.opf
+            package_opf_path = _run_xq(xq_exe, container_xml, "//rootfile/@full-path")
+            if not package_opf_path:
+                raise ConversionError("Could not find OPF package path in container.xml")
+
+            package_opf = tmpdir / package_opf_path
+            if not package_opf.exists():
+                raise ConversionError(f"OPF package file not found: {package_opf_path}")
+
+            package_dir = package_opf.parent
+            logger.info(f"Package directory: {package_dir}")
+
+            # Create CSS files in temp directory
+            css_dir = tmpdir / ".prince_css"
+            css_dir.mkdir(exist_ok=True)
+
+            nav_css_file = css_dir / "nav.css"
+            nav_css_file.write_text(NAV_CSS, encoding="utf-8")
+
+            theme_css_file = css_dir / "theme.css"
+            theme_css_file.write_text(THEME_CSS, encoding="utf-8")
+
+            # Build Prince arguments
+            prince_args = [
+                str(prince_exe),
+                "--style", str(nav_css_file),
+                "--style", str(theme_css_file),
+            ]
+
+            # Get spine items (content files in reading order)
+            spine_idrefs = _run_xq(xq_exe, package_opf, "//spine/itemref/@idref")
+            spine_items = []
+
+            if spine_idrefs:
+                for idref in spine_idrefs.strip().split('\n'):
+                    idref = idref.strip()
+                    if idref:
+                        # Look up the href for this id in the manifest
+                        href = _run_xq(xq_exe, package_opf, f'//manifest/item[@id="{idref}"]/@href')
+                        if href:
+                            spine_items.append(href.strip())
+
+            logger.info(f"Found {len(spine_items)} spine items")
 
             if not spine_items:
-                raise ConversionError("No content found in EPUB spine")
+                raise ConversionError("No spine items found in EPUB - cannot determine content order")
+
+            # Add spine items to Prince args
+            for item in spine_items:
+                item_path = package_dir / item
+                if item_path.exists():
+                    prince_args.append(str(item_path))
+                else:
+                    logger.warning(f"Spine item not found: {item}")
+
+            # Find nav.html (table of contents)
+            # XPath to find item with properties containing "nav"
+            nav_href = _run_xq(
+                xq_exe, package_opf,
+                '//manifest/item[contains(concat(" ", normalize-space(@properties), " "), " nav ")]/@href'
+            )
+
+            if nav_href:
+                nav_html = package_dir / nav_href.strip()
+                if nav_html.exists():
+                    prince_args.append(str(nav_html))
+                    logger.info(f"Found nav.html: {nav_href}")
+                else:
+                    logger.warning(f"Nav file not found: {nav_href}")
+            else:
+                logger.warning("No nav.html found - PDF will have no bookmarks")
+
+            # Extract title and author for PDF metadata
+            title = _run_xq(xq_exe, package_opf, "//metadata/dc:title")
+            if title:
+                prince_args.extend(["--pdf-title", title.strip()])
+                logger.info(f"Title: {title}")
+
+            author = _run_xq(xq_exe, package_opf, "//metadata/dc:creator")
+            if author:
+                prince_args.extend(["--pdf-author", author.strip()])
+                logger.info(f"Author: {author}")
+
+            # Add output path
+            prince_args.extend(["--output", str(pdf_path)])
 
             if progress_callback:
-                progress_callback(f"Converting {len(spine_items)} chapters...")
+                progress_callback("Generating PDF with Prince (this may take a while)...")
 
-            font_config = FontConfiguration()
+            logger.info(f"Running Prince with {len(spine_items)} content files")
+            logger.debug(f"Prince command: {' '.join(prince_args)}")
 
-            # Base CSS for better PDF rendering
-            base_css = CSS(string='''
-                @page {
-                    size: A4;
-                    margin: 1in;
-                }
-                body {
-                    font-family: serif;
-                    font-size: 11pt;
-                    line-height: 1.5;
-                }
-                img {
-                    max-width: 100%;
-                    height: auto;
-                }
-            ''', font_config=font_config)
+            # Run Prince from the package directory
+            result = subprocess.run(
+                prince_args,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                cwd=str(package_dir),
+                timeout=900  # 15 minute timeout
+            )
 
-            # Convert each chapter and collect documents
-            documents = []
-            for i, (item_id, href) in enumerate(spine_items):
-                html_path = temp_path / unquote(href)
+            # Log output
+            if result.stdout:
+                logger.info(f"Prince stdout:\n{result.stdout}")
+            if result.stderr:
+                # Prince logs to stderr even on success
+                logger.info(f"Prince stderr:\n{result.stderr}")
 
-                if not html_path.exists():
-                    continue
+            logger.info(f"Prince return code: {result.returncode}")
 
-                if progress_callback:
-                    progress_callback(f"Processing chapter {i+1}/{len(spine_items)}...")
-
-                try:
-                    doc = HTML(filename=str(html_path), base_url=str(html_path.parent))
-                    documents.append(doc.render(stylesheets=[base_css], font_config=font_config))
-                except Exception as e:
-                    # Skip problematic chapters but continue
-                    if progress_callback:
-                        progress_callback(f"Warning: Skipped chapter {i+1}: {e}")
-                    continue
-
-            if not documents:
-                raise ConversionError("No chapters could be converted")
-
-            if progress_callback:
-                progress_callback("Merging chapters into PDF...")
-
-            # Merge all documents
-            all_pages = []
-            for doc in documents:
-                all_pages.extend(doc.pages)
-
-            # Use the first document's metadata and write all pages
-            if documents:
-                documents[0].copy(all_pages).write_pdf(str(pdf_path))
+            if result.returncode != 0:
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                logger.error(f"Prince conversion failed: {error_msg}")
+                raise ConversionError(f"Prince conversion failed: {error_msg}")
 
             if not pdf_path.exists() or pdf_path.stat().st_size == 0:
-                raise ConversionError("WeasyPrint produced empty output")
+                logger.error("Prince produced empty or no output")
+                raise ConversionError("Prince produced empty or no output")
+
+            logger.info(f"Conversion successful! Output: {pdf_path} ({pdf_path.stat().st_size} bytes)")
 
             if progress_callback:
                 progress_callback("Conversion complete!")
 
             return pdf_path
 
+    except subprocess.TimeoutExpired:
+        logger.error("Prince conversion timed out (>15 minutes)")
+        raise ConversionError("Prince conversion timed out (>15 minutes)")
     except ConversionError:
         raise
     except Exception as e:
-        if pdf_path.exists():
-            pdf_path.unlink()
-        raise ConversionError(f"WeasyPrint conversion failed: {e}")
+        logger.exception(f"Prince conversion failed with exception: {e}")
+        raise ConversionError(f"Prince conversion failed: {e}")
 
 
-def _convert_with_pymupdf(
+def _convert_with_vivliostyle(
     epub_path: Path,
     pdf_path: Path,
     progress_callback: Optional[Callable[[str], None]] = None
 ) -> Path:
     """
-    Convert EPUB to PDF using PyMuPDF.
+    Convert EPUB to PDF using Vivliostyle CLI.
 
-    Note: PyMuPDF may fail on EPUBs with complex CSS (e.g., EPUB3-specific selectors).
+    Vivliostyle uses Chromium for rendering, providing excellent
+    CSS support and high-fidelity output suitable for OCR processing.
     """
-    try:
-        import fitz
-    except ImportError:
-        raise ConversionError("PyMuPDF is not installed. Install with: uv pip install pymupdf")
+    vivliostyle_exe = _find_vivliostyle_executable()
+    if not vivliostyle_exe:
+        raise ConversionError(
+            "Vivliostyle CLI is not installed. Install with: npm install -g @vivliostyle/cli"
+        )
+
+    logger.info(f"Starting Vivliostyle conversion: {epub_path} -> {pdf_path}")
+    logger.info(f"Vivliostyle executable: {vivliostyle_exe}")
 
     if progress_callback:
-        progress_callback("Opening EPUB file with PyMuPDF...")
+        progress_callback("Converting with Vivliostyle CLI...")
 
     try:
-        doc = fitz.open(epub_path)
+        # Set CI=true to avoid TTY detection issues on Windows
+        env = os.environ.copy()
+        env["CI"] = "true"
 
-        if progress_callback:
-            progress_callback(f"Converting {doc.page_count} pages...")
+        # On Windows, build command string for shell execution
+        if sys.platform == "win32":
+            # Quote paths with spaces properly for cmd.exe
+            # Use output file for logs to avoid stdout capture interfering with puppeteer
+            log_output_file = pdf_path.parent / f".vivliostyle_log_{pdf_path.stem}.txt"
+            cmd_str = f'"{vivliostyle_exe}" build "{epub_path}" -o "{pdf_path}" --size A4 --timeout 900 --log-level verbose > "{log_output_file}" 2>&1'
+            logger.info(f"Running command: {cmd_str}")
 
-        doc.save(str(pdf_path))
-        doc.close()
-
-        # Verify output was created and has content
-        if not pdf_path.exists() or pdf_path.stat().st_size == 0:
-            raise ConversionError("PyMuPDF produced empty or no output")
-
-        if progress_callback:
-            progress_callback("Conversion complete!")
-
-        return pdf_path
-
-    except Exception as e:
-        # Clean up partial output
-        if pdf_path.exists():
-            pdf_path.unlink()
-        error_msg = str(e)
-        if "css syntax error" in error_msg.lower() or "syntax error" in error_msg.lower():
-            raise ConversionError(
-                "PyMuPDF failed due to CSS parsing errors in the EPUB. "
-                "This is common with EPUB3 files."
+            result = subprocess.run(
+                cmd_str,
+                timeout=900,  # 15 minute timeout for large EPUBs
+                shell=True,
+                env=env
             )
-        raise ConversionError(f"PyMuPDF conversion failed: {e}")
 
+            # Read the log file
+            stdout_content = ""
+            if log_output_file.exists():
+                stdout_content = log_output_file.read_text(encoding="utf-8", errors="replace")
+                log_output_file.unlink()  # Clean up
 
-def _convert_with_pandoc(
-    epub_path: Path,
-    pdf_path: Path,
-    progress_callback: Optional[Callable[[str], None]] = None
-) -> Path:
-    """
-    Convert EPUB to PDF using Pandoc.
+            # Create a mock result with stdout
+            class MockResult:
+                def __init__(self, returncode, stdout):
+                    self.returncode = returncode
+                    self.stdout = stdout
+                    self.stderr = ""
 
-    Requires a PDF engine (pdflatex, xelatex, or weasyprint).
-    """
-    if not _check_pandoc_available():
-        raise ConversionError("Pandoc is not installed or not in PATH")
-
-    if progress_callback:
-        progress_callback("Converting with Pandoc...")
-
-    # Try different PDF engines in order of preference
-    engines = ["xelatex", "pdflatex", "weasyprint", None]
-
-    for engine in engines:
-        try:
+            result = MockResult(result.returncode, stdout_content)
+        else:
             cmd = [
-                "pandoc",
+                vivliostyle_exe, "build",
                 str(epub_path),
                 "-o", str(pdf_path),
+                "--size", "A4",
+                "--timeout", "900",
+                "--log-level", "verbose",
             ]
-
-            if engine:
-                cmd.extend(["--pdf-engine", engine])
-
-            cmd.extend(["-V", "geometry:margin=1in", "-V", "papersize=a4"])
-
+            logger.info(f"Running command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                encoding="utf-8"
+                encoding="utf-8",
+                timeout=900,  # 15 minute timeout for large EPUBs
+                env=env
             )
 
-            if result.returncode == 0 and pdf_path.exists() and pdf_path.stat().st_size > 0:
-                if progress_callback:
-                    progress_callback("Conversion complete!")
-                return pdf_path
+        # Log all output
+        if result.stdout:
+            logger.info(f"Vivliostyle stdout:\n{result.stdout}")
+        if result.stderr:
+            logger.warning(f"Vivliostyle stderr:\n{result.stderr}")
 
-        except Exception:
-            continue
+        logger.info(f"Vivliostyle return code: {result.returncode}")
 
-    raise ConversionError(
-        "Pandoc conversion failed. No working PDF engine found. "
-        "Install one of: xelatex, pdflatex, or weasyprint"
-    )
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            logger.error(f"Vivliostyle conversion failed: {error_msg}")
+            raise ConversionError(f"Vivliostyle conversion failed: {error_msg}")
 
+        if not pdf_path.exists() or pdf_path.stat().st_size == 0:
+            logger.error("Vivliostyle produced empty or no output")
+            raise ConversionError("Vivliostyle produced empty or no output")
 
-def _convert_with_calibre(
-    epub_path: Path,
-    pdf_path: Path,
-    progress_callback: Optional[Callable[[str], None]] = None
-) -> Path:
-    """
-    Convert EPUB to PDF using Calibre's ebook-convert.
-
-    Uses 'tablet' output profile to prevent image downscaling.
-    """
-    calibre_exe = _find_calibre_executable()
-    if not calibre_exe:
-        raise ConversionError(
-            "Calibre's ebook-convert is not installed. "
-            "Install Calibre from: https://calibre-ebook.com/download"
-        )
-
-    if progress_callback:
-        progress_callback("Running Calibre ebook-convert...")
-
-    try:
-        result = subprocess.run(
-            [
-                str(calibre_exe),
-                str(epub_path),
-                str(pdf_path),
-                "--output-profile", "tablet",
-                "--paper-size", "a4",
-                "--preserve-cover-aspect-ratio",
-                "--embed-all-fonts",
-                "--pdf-page-margin-left", "72",
-                "--pdf-page-margin-right", "72",
-                "--pdf-page-margin-top", "72",
-                "--pdf-page-margin-bottom", "72",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            encoding="utf-8"
-        )
+        logger.info(f"Conversion successful! Output: {pdf_path} ({pdf_path.stat().st_size} bytes)")
 
         if progress_callback:
             progress_callback("Conversion complete!")
 
         return pdf_path
 
-    except subprocess.CalledProcessError as e:
-        raise ConversionError(f"Calibre conversion failed: {e.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.error("Vivliostyle conversion timed out (>15 minutes)")
+        raise ConversionError("Vivliostyle conversion timed out (>15 minutes)")
+    except ConversionError:
+        raise
     except Exception as e:
-        raise ConversionError(f"Calibre conversion failed: {e}")
+        logger.exception(f"Vivliostyle conversion failed with exception: {e}")
+        raise ConversionError(f"Vivliostyle conversion failed: {e}")
 
 
 def get_available_methods() -> list[ConversionMethod]:
@@ -408,17 +523,13 @@ def get_available_methods() -> list[ConversionMethod]:
     """
     available = []
 
-    if _check_weasyprint_available():
-        available.append(ConversionMethod.WEASYPRINT)
+    if _check_prince_available():
+        available.append(ConversionMethod.PRINCE)
+        logger.debug("Prince is available")
 
-    if _check_pymupdf_available():
-        available.append(ConversionMethod.PYMUPDF)
-
-    if _check_pandoc_available():
-        available.append(ConversionMethod.PANDOC)
-
-    if _check_calibre_available():
-        available.append(ConversionMethod.CALIBRE)
+    if _check_vivliostyle_available():
+        available.append(ConversionMethod.VIVLIOSTYLE)
+        logger.debug("Vivliostyle is available")
 
     return available
 
@@ -439,8 +550,8 @@ def convert_epub_to_pdf(
         epub_path: Path to the input EPUB file
         pdf_path: Path for the output PDF file. If None, uses same
                   directory and name as EPUB with .pdf extension.
-        method: Conversion method to use. AUTO will try methods in
-                order of preference: WeasyPrint > PyMuPDF > Pandoc > Calibre
+        method: Conversion method to use. AUTO will try Prince first,
+                then Vivliostyle as fallback.
         progress_callback: Optional callback function that receives
                           progress messages as strings
 
@@ -454,10 +565,16 @@ def convert_epub_to_pdf(
     """
     epub_path = Path(epub_path)
 
+    logger.info(f"=== Starting conversion ===")
+    logger.info(f"Input: {epub_path}")
+    logger.info(f"Method: {method.value}")
+
     if not epub_path.exists():
+        logger.error(f"EPUB file not found: {epub_path}")
         raise FileNotFoundError(f"EPUB file not found: {epub_path}")
 
     if not epub_path.suffix.lower() == ".epub":
+        logger.error(f"File is not an EPUB: {epub_path}")
         raise ValueError(f"File is not an EPUB: {epub_path}")
 
     # Determine output path
@@ -466,79 +583,53 @@ def convert_epub_to_pdf(
     else:
         pdf_path = Path(pdf_path)
 
+    logger.info(f"Output: {pdf_path}")
+
     # Ensure output directory exists
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
 
     if method == ConversionMethod.AUTO:
-        # Try methods in order of preference
         errors = []
 
-        # 1. Try WeasyPrint first (best compatibility, pure Python)
-        if _check_weasyprint_available():
+        # 1. Try Prince first (best typography)
+        if _check_prince_available():
             try:
                 if progress_callback:
-                    progress_callback("Trying WeasyPrint...")
-                return _convert_with_weasyprint(epub_path, pdf_path, progress_callback)
+                    progress_callback("Using Prince XML...")
+                return _convert_with_prince(epub_path, pdf_path, progress_callback)
             except ConversionError as e:
-                errors.append(f"WeasyPrint: {e}")
+                errors.append(f"Prince: {e}")
+                logger.warning(f"Prince failed, trying next method...")
                 if progress_callback:
-                    progress_callback("WeasyPrint failed, trying PyMuPDF...")
+                    progress_callback("Prince failed, trying Vivliostyle...")
 
-        # 2. Try PyMuPDF (fast but CSS issues)
-        if _check_pymupdf_available():
+        # 2. Try Vivliostyle as fallback
+        if _check_vivliostyle_available():
             try:
                 if progress_callback:
-                    progress_callback("Trying PyMuPDF...")
-                return _convert_with_pymupdf(epub_path, pdf_path, progress_callback)
+                    progress_callback("Using Vivliostyle CLI...")
+                return _convert_with_vivliostyle(epub_path, pdf_path, progress_callback)
             except ConversionError as e:
-                errors.append(f"PyMuPDF: {e}")
-                if progress_callback:
-                    progress_callback("PyMuPDF failed, trying Pandoc...")
-
-        # 3. Try Pandoc
-        if _check_pandoc_available():
-            try:
-                if progress_callback:
-                    progress_callback("Trying Pandoc...")
-                return _convert_with_pandoc(epub_path, pdf_path, progress_callback)
-            except ConversionError as e:
-                errors.append(f"Pandoc: {e}")
-                if progress_callback:
-                    progress_callback("Pandoc failed, trying Calibre...")
-
-        # 4. Try Calibre
-        if _check_calibre_available():
-            try:
-                if progress_callback:
-                    progress_callback("Trying Calibre...")
-                return _convert_with_calibre(epub_path, pdf_path, progress_callback)
-            except ConversionError as e:
-                errors.append(f"Calibre: {e}")
+                errors.append(f"Vivliostyle: {e}")
 
         if errors:
-            raise ConversionError(
-                "All conversion methods failed:\n" + "\n".join(errors)
-            )
+            error_msg = "All conversion methods failed:\n" + "\n".join(errors)
+            logger.error(error_msg)
+            raise ConversionError(error_msg)
         else:
-            raise ValueError(
-                "No conversion tools available. Please install one of:\n"
-                "- WeasyPrint: uv pip install weasyprint\n"
-                "- PyMuPDF: uv pip install pymupdf\n"
-                "- Pandoc: https://pandoc.org/installing.html\n"
-                "- Calibre: https://calibre-ebook.com/download"
+            error_msg = (
+                "No conversion tools available. Please install:\n"
+                "- Prince XML: https://www.princexml.com/\n"
+                "- Or Vivliostyle CLI: npm install -g @vivliostyle/cli"
             )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
-    elif method == ConversionMethod.WEASYPRINT:
-        return _convert_with_weasyprint(epub_path, pdf_path, progress_callback)
+    elif method == ConversionMethod.PRINCE:
+        return _convert_with_prince(epub_path, pdf_path, progress_callback)
 
-    elif method == ConversionMethod.PYMUPDF:
-        return _convert_with_pymupdf(epub_path, pdf_path, progress_callback)
-
-    elif method == ConversionMethod.PANDOC:
-        return _convert_with_pandoc(epub_path, pdf_path, progress_callback)
-
-    elif method == ConversionMethod.CALIBRE:
-        return _convert_with_calibre(epub_path, pdf_path, progress_callback)
+    elif method == ConversionMethod.VIVLIOSTYLE:
+        return _convert_with_vivliostyle(epub_path, pdf_path, progress_callback)
 
     else:
         raise ValueError(f"Unknown conversion method: {method}")
