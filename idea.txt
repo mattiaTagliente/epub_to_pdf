@@ -1,0 +1,206 @@
+Executive Summary
+For your use case of converting EPUBs to PDF for subsequent Mistral OCR processing (specifically to extract image-based equations as LaTeX), the conversion tool must prioritize:
+
+Image quality preservation — Equations stored as images must remain crisp and high-resolution
+Layout fidelity — Spatial relationships in math must be preserved
+Programmability — Integration into a Python-based ZoteroMCP workflow
+No rasterization degradation — Images should not be recompressed or downscaled
+Tool Comparison Matrix
+Tool	Image Quality	Math/Equations	CLI Support	Python Integration	Active Development	Best For
+Calibre (ebook-convert)	⭐⭐⭐⭐	⭐⭐⭐	✅ Excellent	✅ Subprocess	✅ Very Active	General-purpose, configurable
+MuPDF (mutool convert)	⭐⭐⭐⭐⭐	⭐⭐⭐⭐	✅ Excellent	✅ PyMuPDF	✅ Active	High-fidelity rendering
+Pandoc	⭐⭐⭐	⭐⭐⭐⭐⭐ (MathML→LaTeX)	✅ Excellent	✅ Subprocess	✅ Very Active	MathML preservation
+WeasyPrint	⭐⭐⭐⭐	⭐⭐⭐	✅ Python native	✅ Native	✅ Active	CSS-accurate layouts
+wkhtmltopdf	⭐⭐	⭐⭐	✅	⚠️ pdfkit wrapper	❌ Deprecated (2023)	Legacy use only
+Detailed Tool Analysis
+1. Calibre ebook-convert — The Swiss Army Knife
+Strengths:
+
+Extensive configuration options: Page size, margins, DPI, font embedding
+Wide format support: EPUB2, EPUB3, MOBI, AZW, and more
+Excellent documentation: ebook-convert input.epub output.pdf -h shows all options
+Cross-platform: Windows, macOS, Linux
+Key Options for Image Quality:
+
+ebook-convert input.epub output.pdf \
+    --output-profile tablet \           # Prevents image downscaling
+    --paper-size a4 \                   # Or custom dimensions
+    --preserve-cover-aspect-ratio \
+    --pdf-page-margin-left 72 \
+    --pdf-page-margin-right 72 \
+    --embed-all-fonts
+Limitations:
+
+May rasterize SVG graphics to JPEG during conversion
+Image quality depends heavily on output profile settings
+Not perfect for complex layouts with equation images
+Best For: General-purpose conversion with good customization
+
+2. MuPDF mutool convert — High-Fidelity Rendering ⭐ RECOMMENDED
+Strengths:
+
+Sub-pixel accurate text and graphics rendering (official claim: "metrics accurate to within fractions of a pixel")
+Native EPUB→PDF support with customization options
+PyMuPDF (fitz) provides direct Python integration
+Lightweight and fast
+Preserves image quality with proper settings
+Key Options:
+
+mutool convert -o output.pdf \
+    -O "width=595,height=842" \     # A4 dimensions in points
+    -O "em=12" \                    # Font size
+    -O "user-css=custom.css" \      # Custom styling
+    input.epub
+Python Integration via PyMuPDF:
+
+import fitz  # PyMuPDF
+def epub_to_pdf(epub_path: str, pdf_path: str) -> None:
+    """Convert EPUB to PDF using PyMuPDF (MuPDF backend)."""
+    doc = fitz.open(epub_path)  # Opens EPUB
+    doc.save(pdf_path)           # Saves as PDF
+    doc.close()
+Note: PyMuPDF's direct EPUB→PDF may have limitations. For full control, use mutool as a subprocess.
+
+Best For: Your use case — high-quality PDF output for OCR processing
+
+3. Pandoc — Document Conversion Expert
+Strengths:
+
+Excellent for MathML preservation: Pandoc can convert MathML equations in EPUB3 directly to LaTeX during the conversion process
+Highly customizable with Lua filters
+LaTeX-quality PDF output when using --pdf-engine=xelatex
+Key Command:
+
+pandoc input.epub -o output.pdf \
+    --pdf-engine=xelatex \
+    --toc \
+    -V geometry:margin=1in
+Limitations:
+
+If equations are images (not MathML), Pandoc cannot convert them to LaTeX — it will just embed the images
+Layout preservation can be inconsistent for complex EPUBs
+Requires a LaTeX engine installed
+Best For: EPUBs where equations are encoded as MathML (not images)
+
+4. WeasyPrint — CSS-Accurate Rendering
+Strengths:
+
+Pure Python (no binary dependencies)
+Modern CSS support (Flexbox, Grid, paged media)
+High-quality PDF output for print-ready documents
+Actively developed
+Workflow:
+
+from weasyprint import HTML
+import zipfile
+import os
+def epub_to_pdf_weasyprint(epub_path: str, pdf_path: str) -> None:
+    """Convert EPUB to PDF via WeasyPrint (extract HTML first)."""
+    with zipfile.ZipFile(epub_path, 'r') as z:
+        # Extract HTML content
+        for name in z.namelist():
+            if name.endswith('.xhtml') or name.endswith('.html'):
+                content = z.read(name).decode('utf-8')
+                # Render each chapter to PDF
+                HTML(string=content).write_pdf(pdf_path)
+Limitations:
+
+No native EPUB support — requires extracting HTML from EPUB first
+More complex workflow for multi-chapter EPUBs
+No JavaScript execution
+Best For: Converting individual HTML/XHTML chapters with precise CSS control
+
+5. wkhtmltopdf — DEPRECATED ⚠️
+Status: Last release June 2020, archived January 2023
+
+NOT RECOMMENDED due to:
+
+Legacy WebKit engine with limited modern CSS/HTML support
+No security updates
+Poor JavaScript execution
+Known issues with image rendering
+Recommendation for Your Workflow
+Given your requirements:
+
+EPUB contains equations as images (not MathML)
+Goal is OCR extraction via Mistral OCR (which processes PDFs)
+Integration with Python/ZoteroMCP toolchain
+Primary Recommendation: MuPDF (mutool convert)
+Rationale:
+
+✅ Highest fidelity rendering — essential for OCR accuracy
+✅ Preserves image quality without recompression
+✅ Fast and lightweight
+✅ PyMuPDF provides Python bindings
+✅ Customizable page dimensions, fonts, CSS
+Implementation Approach:
+
+import subprocess
+from pathlib import Path
+def epub_to_pdf_mutool(epub_path: Path, pdf_path: Path) -> Path:
+    """
+    Convert EPUB to PDF using mutool for high-fidelity output.
+    
+    Optimized for subsequent OCR processing:
+    - Preserves image quality/DPI
+    - A4 page dimensions
+    - Clean layout for OCR extraction
+    """
+    # A4 dimensions: 595 x 842 points (72 DPI)
+    result = subprocess.run([
+        "mutool", "convert",
+        "-o", str(pdf_path),
+        "-O", "width=595,height=842",  # A4 dimensions
+        "-O", "em=12",                  # Base font size
+        str(epub_path)
+    ], capture_output=True, text=True, check=True)
+    
+    return pdf_path
+Fallback: Calibre ebook-convert
+If mutool is not available or produces suboptimal results for specific EPUBs:
+
+import subprocess
+from pathlib import Path
+def epub_to_pdf_calibre(epub_path: Path, pdf_path: Path) -> Path:
+    """
+    Convert EPUB to PDF using Calibre's ebook-convert.
+    
+    Uses 'tablet' profile to prevent image downscaling.
+    """
+    subprocess.run([
+        "ebook-convert",
+        str(epub_path),
+        str(pdf_path),
+        "--output-profile", "tablet",
+        "--paper-size", "a4",
+        "--preserve-cover-aspect-ratio",
+        "--embed-all-fonts",
+    ], check=True)
+    
+    return pdf_path
+Installation
+MuPDF/mutool
+Windows (Chocolatey):
+
+choco install mupdf
+Windows (Manual): Download from https://mupdf.com/releases/ and add to PATH.
+
+Python (PyMuPDF):
+
+pip install pymupdf
+# or
+uv pip install pymupdf
+Calibre
+Windows:
+
+choco install calibre
+Or download from: https://calibre-ebook.com/download
+
+Conclusion
+For your specific workflow of EPUB → PDF → Mistral OCR → LaTeX equations:
+
+Step	Tool	Reason
+EPUB → PDF	MuPDF (mutool)	Highest fidelity, preserves image quality
+PDF → Markdown/LaTeX	Mistral OCR	Best equation recognition
+Fallback	Calibre ebook-convert	When mutool fails or unavailable
+The key insight is that image-based equations require pixel-perfect rendering in the PDF to ensure Mistral OCR can accurately recognize and convert them to LaTeX. MuPDF's sub-pixel accuracy makes it the optimal choice.

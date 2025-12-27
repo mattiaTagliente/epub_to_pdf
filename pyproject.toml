@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "epub-to-pdf"
+version = "1.0.0"
+description = "A graphical utility for converting EPUB files to PDF, optimized for Mistral OCR processing"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Mattia Tagliente", email = "mattiaTagliente@github.com" }
+]
+requires-python = ">=3.11"
+keywords = [
+    "epub",
+    "pdf",
+    "converter",
+    "ebook",
+    "ocr",
+    "mistral",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Text Processing :: Markup",
+]
+dependencies = [
+    "pymupdf>=1.24.0",
+    "tkinterdnd2>=0.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+epub-to-pdf = "epub_to_pdf.app:main"
+
+[project.gui-scripts]
+epub-to-pdf-gui = "epub_to_pdf.app:main"
+
+[project.urls]
+Homepage = "https://github.com/mattiaTagliente/epub_to_pdf"
+Repository = "https://github.com/mattiaTagliente/epub_to_pdf"
+Issues = "https://github.com/mattiaTagliente/epub_to_pdf/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/epub_to_pdf"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
