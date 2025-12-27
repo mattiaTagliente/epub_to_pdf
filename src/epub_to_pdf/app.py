@@ -234,8 +234,9 @@ class EPUBToPDFApp:
 
         methods = [
             ("Auto (Recommended)", "auto"),
+            ("WeasyPrint", "weasyprint"),
             ("PyMuPDF", "pymupdf"),
-            ("mutool", "mutool"),
+            ("Pandoc", "pandoc"),
             ("Calibre", "calibre"),
         ]
 
@@ -438,8 +439,9 @@ class EPUBToPDFApp:
         method_str = self.selected_method.get()
         method = {
             "auto": ConversionMethod.AUTO,
+            "weasyprint": ConversionMethod.WEASYPRINT,
             "pymupdf": ConversionMethod.PYMUPDF,
-            "mutool": ConversionMethod.MUTOOL,
+            "pandoc": ConversionMethod.PANDOC,
             "calibre": ConversionMethod.CALIBRE,
         }.get(method_str, ConversionMethod.AUTO)
 
